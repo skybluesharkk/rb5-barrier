@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>Barrier viewer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html,body{margin:0;height:100%;background:#1a1a2e;color:#eee;font:13px/1.4 system-ui,sans-serif;overflow:hidden}
+  #hud{position:absolute;left:12px;top:10px;background:rgba(0,0,0,.55);padding:8px 12px;border-radius:6px;white-space:pre;font-family:ui-monospace,monospace;font-size:12px;pointer-events:none}
+  #hud b{color:#00d4ff}
+  .hit{color:#ff4444;font-weight:bold}
+  #legend{position:absolute;right:12px;top:10px;background:rgba(0,0,0,.55);padding:8px 12px;border-radius:6px;font-size:12px;pointer-events:none}
+  .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:middle}
+</style></head><body>
+<div id="hud">connecting…</div>
+<div id="legend">
+  <div><span class="sw" style="background:#00ff88"></span>measured TCP (FK of encoders)</div>
+  <div><span class="sw" style="background:#ffd700"></span>command p_cmd (after barrier)</div>
+  <div><span class="sw" style="background:#e87ba4"></span>hand target p_des (before barrier)</div>
+  <div><span class="sw" style="background:#2a78d6"></span>barrier box + base cylinder (robot stops here)</div>
+  <div><span class="sw" style="background:#e34948"></span>safety box (always hard stop)</div>
+  <div style="color:#999;margin-top:4px">drag: orbit · wheel: zoom · right-drag: pan · M: mesh on/off</div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/ColladaLoader.js"></script>
+<script>
+const FACES=["xmin","xmax","ymin","ymax","zmin","zmax","rmin"];
+const scene=new THREE.Scene(); scene.background=new THREE.Color(0x1a1a2e);
+const cam=new THREE.PerspectiveCamera(50,innerWidth/innerHeight,0.01,20);
+// 로봇 base 좌표 (z 위) 를 three.js (y 위) 로: 씬 전체를 회전시키는 대신 좌표 변환 함수를 쓴다
+const R=p=>new THREE.Vector3(p[0],p[2],-p[1]);
+cam.position.set(1.2,1.0,1.2);
+const ren=new THREE.WebGLRenderer({antialias:true}); ren.setSize(innerWidth,innerHeight); document.body.appendChild(ren.domElement);
+const ctl=new THREE.OrbitControls(cam,ren.domElement); ctl.target.set(0.25,0.4,0.1);
+scene.add(new THREE.AmbientLight(0xffffff,0.7)); const dl=new THREE.DirectionalLight(0xffffff,0.6); dl.position.set(1,2,1); scene.add(dl);
+const grid=new THREE.GridHelper(2,20,0x444466,0x33334d); scene.add(grid);
+// base 축: x 빨강, y 초록, z 파랑 (로봇 좌표)
+function axis(dir,color){const g=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0),R(dir)]);scene.add(new THREE.Line(g,new THREE.LineBasicMaterial({color})));}
+axis([0.15,0,0],0xff4444);axis([0,0.15,0],0x44ff44);axis([0,0,0.15],0x4488ff);
+
+function boxEdges(b,color,opacity){
+  const lo=R([b.xmin,b.ymin,b.zmin]),hi=R([b.xmax,b.ymax,b.zmax]);
+  const g=new THREE.BoxGeometry(Math.abs(hi.x-lo.x),Math.abs(hi.y-lo.y),Math.abs(hi.z-lo.z));
+  const e=new THREE.LineSegments(new THREE.EdgesGeometry(g),new THREE.LineBasicMaterial({color,transparent:true,opacity}));
+  e.position.set((lo.x+hi.x)/2,(lo.y+hi.y)/2,(lo.z+hi.z)/2); return e;
+}
+// 실험 박스 면 6개 (접촉 시 빨강으로 켜짐)
+function facePlanes(b){
+  const out=[];const sx=b.xmax-b.xmin,sy=b.ymax-b.ymin,sz=b.zmax-b.zmin;
+  const cx=(b.xmin+b.xmax)/2,cy=(b.ymin+b.ymax)/2,cz=(b.zmin+b.zmax)/2;
+  const spec=[[b.xmin,cy,cz,[0,1,0],sy,sz],[b.xmax,cy,cz,[0,1,0],sy,sz],[cx,b.ymin,cz,[1,0,0],sx,sz],[cx,b.ymax,cz,[1,0,0],sx,sz],[cx,cy,b.zmin,[1,0,0],sx,sy],[cx,cy,b.zmax,[1,0,0],sx,sy]];
+  spec.forEach((s,i)=>{
+    const m=new THREE.Mesh(new THREE.PlaneGeometry(1,1),new THREE.MeshBasicMaterial({color:0xff4444,transparent:true,opacity:0,side:THREE.DoubleSide,depthWrite:false}));
+    m.position.copy(R([s[0],s[1],s[2]]));
+    if(i<2){m.rotation.y=Math.PI/2;m.scale.set(sy,sz,1);}          // x 면: three 의 z-y 평면
+    else if(i<4){m.scale.set(sx,sz,1);}                              // y 면: x-y 평면 (three z 고정)
+    else{m.rotation.x=Math.PI/2;m.scale.set(sx,sy,1);}               // z 면: x-z 평면
+    scene.add(m);out.push(m);
+  });return out;
+}
+let boxObj=null,safeObj=null,cylObj=null,planes=[],boxKey="";
+function cylinder(r,b){const h=b.zmax-b.zmin;const g=new THREE.CylinderGeometry(r,r,h,48,1,true);
+  const m=new THREE.Mesh(g,new THREE.MeshBasicMaterial({color:0x2a78d6,transparent:true,opacity:0.18,side:THREE.DoubleSide,depthWrite:false}));
+  m.position.set(0,b.zmin+h/2,0);const e=new THREE.LineSegments(new THREE.EdgesGeometry(g),new THREE.LineBasicMaterial({color:0x2a78d6,transparent:true,opacity:0.5}));m.add(e);return m;}
+const mkSphere=(r,color)=>{const m=new THREE.Mesh(new THREE.SphereGeometry(r,16,12),new THREE.MeshStandardMaterial({color}));scene.add(m);m.visible=false;return m;};
+const meas=mkSphere(0.012,0x00ff88), cmd=mkSphere(0.009,0xffd700), des=mkSphere(0.009,0xe87ba4);
+des.material.transparent=true;des.material.opacity=0.6;
+const desLine=new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(),new THREE.Vector3()]),new THREE.LineBasicMaterial({color:0xe87ba4})); scene.add(desLine);
+// 로봇 메시 (URDF 링크 프레임, 로봇 좌표 z-up). robotGroup 이 로봇 좌표 → three 좌표(y-up) 변환을 맡는다: (x,y,z) → (x,z,-y)
+const robotGroup=new THREE.Group(); robotGroup.rotation.x=-Math.PI/2; scene.add(robotGroup);
+const linkObjs=[]; let meshesLoaded=false, meshVisible=true;
+function loadMeshes(names){
+  const loader=new THREE.ColladaLoader();
+  names.forEach((n,i)=>{
+    const holder=new THREE.Group(); holder.matrixAutoUpdate=false; robotGroup.add(holder); linkObjs[i]=holder;
+    loader.load('/meshes/'+n, c=>{
+      const sc=c.scene; sc.quaternion.identity(); sc.scale.set(1,1,1);   // 로더의 Z_UP→Y_UP 변환 취소: URDF 링크 프레임 그대로
+      sc.traverse(o=>{ if(o.isMesh){ o.material=new THREE.MeshStandardMaterial({color:0xb0b4c8,metalness:0.2,roughness:0.6,transparent:true,opacity:0.9}); } });
+      holder.add(sc);
+    }, undefined, e=>console.warn('mesh load fail', n, e));
+  });
+  meshesLoaded=true;
+}
+addEventListener('keydown',e=>{ if(e.key==='m'||e.key==='M'){ meshVisible=!meshVisible; robotGroup.visible=meshVisible; } });
+// 팔 링크
+const armMat=new THREE.LineBasicMaterial({color:0xdddddd,linewidth:2});
+const arm=new THREE.Line(new THREE.BufferGeometry(),armMat); scene.add(arm);
+const joints=[];for(let i=0;i<8;i++)joints.push(mkSphere(0.02,0x9999bb));
+// 궤적
+const TRAIL=600;const trailPos=new Float32Array(TRAIL*3);const trailGeo=new THREE.BufferGeometry();trailGeo.setAttribute('position',new THREE.BufferAttribute(trailPos,3));trailGeo.setDrawRange(0,0);
+scene.add(new THREE.Line(trailGeo,new THREE.LineBasicMaterial({color:0x00ff88,transparent:true,opacity:0.6})));let trailN=0;
+const hud=document.getElementById('hud');
+function fmt(v,d=1){return (v==null||isNaN(v))?'  --':v.toFixed(d).padStart(6);}
+async function poll(){
+  try{
+    const s=await (await fetch('/state')).json();
+    if(s.box){const k=JSON.stringify([s.box,s.safety_box,s.r_min,s.mode]);if(k!==boxKey){boxKey=k;if(boxObj){scene.remove(boxObj);scene.remove(safeObj);planes.forEach(p=>scene.remove(p));}if(cylObj)scene.remove(cylObj);
+      boxObj=boxEdges(s.box,0x2a78d6,0.9);scene.add(boxObj);planes=facePlanes(s.box);
+      safeObj=boxEdges(s.safety_box,0xe34948,0.9);scene.add(safeObj);
+      cylObj=(s.r_min>0)?cylinder(s.r_min,s.box):null;if(cylObj)scene.add(cylObj);}}
+    if(s.active){planes.forEach((p,i)=>p.material.opacity=s.active[i]?0.35:(s.d&&s.d[i]<0.03?0.08:0));
+      if(cylObj)cylObj.material.opacity=s.active[6]?0.5:(s.d&&s.d[6]<0.03?0.3:0.18);}
+    if(s.tcp_meas){meas.visible=true;meas.position.copy(R(s.tcp_meas));if(trailN<TRAIL){trailPos.set([meas.position.x,meas.position.y,meas.position.z],trailN*3);trailN++;}else{trailPos.copyWithin(0,3);trailPos.set([meas.position.x,meas.position.y,meas.position.z],(TRAIL-1)*3);}trailGeo.setDrawRange(0,trailN);trailGeo.attributes.position.needsUpdate=true;}
+    if(s.p_cmd){cmd.visible=true;cmd.position.copy(R(s.p_cmd));}
+    if(s.p_des){des.visible=true;des.position.copy(R(s.p_des));desLine.geometry.setFromPoints([cmd.position,des.position]);}
+    if(s.meshes&&s.meshes.length&&!meshesLoaded)loadMeshes(s.meshes);
+    if(s.links){s.links.forEach((m,i)=>{ if(linkObjs[i]){ linkObjs[i].matrix.set(...m); linkObjs[i].matrixWorldNeedsUpdate=true; } });}
+    if(s.frames){const pts=s.frames.map(R);arm.geometry.dispose();arm.geometry=new THREE.BufferGeometry().setFromPoints(pts);pts.forEach((p,i)=>{joints[i].visible=!meshVisible||i>=7;joints[i].position.copy(p);});arm.visible=!meshVisible;}
+    let h=`<b>${s.mode||'?'}${s.mode==='cbf'?' α='+s.alpha:''}</b>  ${s.tracking?'● TRACKING':'○ standby'}${s.replay?'  [replay '+s.replay+']':''}\n`;
+    if(s.tcp_meas)h+=`TCP meas  ${fmt(s.tcp_meas[0]*100)} ${fmt(s.tcp_meas[1]*100)} ${fmt(s.tcp_meas[2]*100)} cm\n`;
+    if(s.p_cmd)h+=`p_cmd     ${fmt(s.p_cmd[0]*100)} ${fmt(s.p_cmd[1]*100)} ${fmt(s.p_cmd[2]*100)} cm\n`;
+    if(s.d){h+='wall   ';FACES.forEach((f,i)=>{if(i>=s.d.length)return;const t=`${f} ${fmt(s.d[i]*100)}`;h+=(s.active&&s.active[i])?`<span class="hit">${t}</span>  `:t+'  ';});}
+    hud.innerHTML=h;
+  }catch(e){hud.textContent='no /state: '+e;}
+}
+setInterval(poll,50);
+addEventListener('resize',()=>{cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix();ren.setSize(innerWidth,innerHeight);});
+(function loop(){requestAnimationFrame(loop);ctl.update();ren.render(scene,cam);})();
+</script></body></html>

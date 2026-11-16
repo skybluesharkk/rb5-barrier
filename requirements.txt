@@ -1,0 +1,8 @@
+numpy
+scipy
+pyyaml
+pyzmq
+matplotlib
+opencv-python      # panel.py (실시간 패널 창)
+rbpodo @ git+https://github.com/skybluesharkk/rbpodo.git
+# paho-mqtt        # 선택: --mqtt (Jane 언리얼로 상태 발행)

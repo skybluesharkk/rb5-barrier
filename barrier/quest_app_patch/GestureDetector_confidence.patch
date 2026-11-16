@@ -1,0 +1,57 @@
+--- GestureDetector.orig.cs	2026-10-27 17:17:08.260261889 +0900
++++ GestureDetector.cs	2026-10-27 17:23:29.844546754 +0900
+@@ -154,6 +154,37 @@
+         return vectorString;
+     }
+ 
++    // [PATCH 2026-10-27] Hand-tracking confidence trailer (see SendHandData).
++    // OVRPlugin.TrackingConfidence is { Low = 0, High = 0x3f800000 }: 0x3f800000 is the IEEE-754 bit pattern of 1.0f,
++    // i.e. the native runtime reports confidence as a float in [0,1] and the C# wrapper only names the two ends.
++    // Reinterpreting the enum bits as float therefore yields the runtime's value unchanged (0.0 / 1.0 on current
++    // firmware, intermediate values if the runtime ever reports them).
++    private static float ConfToFloat(OVRHand.TrackingConfidence c)
++    {
++        float f = BitConverter.ToSingle(BitConverter.GetBytes((int)c), 0);
++        if (float.IsNaN(f) || f < 0f) f = 0f;
++        if (f > 1f) f = 1f;
++        return f;
++    }
++
++    public string SerializeTrackingState()
++    {
++        OVRHand h = RightHand;
++        string ts = Time.unscaledTime.ToString("F4");
++        if (h == null)
++            return "0,0.000,0.000,0.000,0.000,0.000,0.000,0,0," + ts;
++        return (h.IsTracked ? 1 : 0) + ","
++             + ConfToFloat(h.HandConfidence).ToString("F3") + ","
++             + ConfToFloat(h.GetFingerConfidence(OVRHand.HandFinger.Thumb)).ToString("F3") + ","
++             + ConfToFloat(h.GetFingerConfidence(OVRHand.HandFinger.Index)).ToString("F3") + ","
++             + ConfToFloat(h.GetFingerConfidence(OVRHand.HandFinger.Middle)).ToString("F3") + ","
++             + ConfToFloat(h.GetFingerConfidence(OVRHand.HandFinger.Ring)).ToString("F3") + ","
++             + ConfToFloat(h.GetFingerConfidence(OVRHand.HandFinger.Pinky)).ToString("F3") + ","
++             + (h.IsDataValid ? 1 : 0) + ","
++             + (h.IsDataHighConfidence ? 1 : 0) + ","
++             + ts;
++    }
++
+     public void SendHandData(String TypeMarker)
+     {
+         // Getting bone positional information
+@@ -168,6 +199,16 @@
+         string RightHandDataString = SerializeVector3List(rightHandGestureData);
+         RightHandDataString = TypeMarker + ":" + RightHandDataString;
+ 
++        // [PATCH 2026-10-27] Append hand-tracking confidence after the trailing ':' so receivers can tell
++        // real poses from the SDK's extrapolated / lost-tracking poses. Format (one extra field, comma separated):
++        //   tracked,handConf,thumbConf,indexConf,middleConf,ringConf,pinkyConf,dataValid,highConf,unityTime
++        //   tracked   : 1 if OVRHand.IsTracked (HandTracked status flag), else 0
++        //   *Conf     : float 0.000..1.000 (runtime confidence; enum bits reinterpreted as float, see ConfToFloat)
++        //   dataValid : OVRHand.IsDataValid, highConf : OVRHand.IsDataHighConfidence (tracked && hand High)
++        //   unityTime : Time.unscaledTime (s) when this frame was sampled
++        // Backward compatible: Open-Teach's oculus.py uses split(':')[1] and ignores the rest.
++        RightHandDataString += SerializeTrackingState();
++
+         client.SendFrame(RightHandDataString);
+         byte[] recievedToken = client.ReceiveFrameBytes();
+     }
